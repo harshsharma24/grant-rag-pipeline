@@ -2,12 +2,12 @@ import os
 from dotenv import load_dotenv
 from pymongo import MongoClient
 
-# Load environment variables from .env file
-load_dotenv()
 
-# API Keys
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# Load environment variables
+load_dotenv()
 MONGO_URI = os.getenv("MONGO_URI")
+OPENAI_API_KEY=os.getenv("OPENAI_API_KEY2")
+
 
 # Connect to MongoDB
 client = MongoClient(MONGO_URI)
