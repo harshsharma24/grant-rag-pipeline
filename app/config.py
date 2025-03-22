@@ -16,3 +16,4 @@ db = client["grant_ai"]  # Database name
 # Collections
 grants_collection = db["grants"]  # Stores full grant applications
 embeddings_collection = db["grant_embeddings"]  # Stores vector embeddings
+template_collection= db["template"]
