@@ -10,7 +10,15 @@ import docx
 import fitz
 import os
 import tiktoken
+from app.grant_service import fetch_grant_details, store_grant_metadata, update_grant_status
+import requests
+from flask import send_file
+from docx import Document
+import tempfile
 
+
+# Initialize OpenAI Client
+client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
 @app.route("/")
 def home():
@@ -216,8 +224,7 @@ def retrieve_relevant_grants():
     })
 
 
-# Initialize OpenAI Client
-client = openai.OpenAI(api_key=OPENAI_API_KEY)
+
 
 @app.route("/ask_question", methods=["POST"])
 def ask_question():
@@ -270,3 +277,132 @@ def ask_question():
         "similarity_score": float(similarities[best_match_index])
     })
 
+@app.route("/fetch_and_store_grant", methods=["POST"])
+def fetch_and_store_grant():
+    """Fetch full grant details from Grants.gov API and return the full response."""
+    data = request.json
+    opportunity_id = data.get("opportunityId")
+
+    GRANTS_API_URL = "https://api.grants.gov/v1/api/fetchOpportunity"
+
+    if not opportunity_id:
+        return jsonify({"error": "Opportunity ID is required"}), 400
+
+    response = requests.post(GRANTS_API_URL, json={"opportunityId": opportunity_id})
+
+    if response.status_code != 200:
+        return jsonify({"error": "Failed to fetch grant data"}), 500
+
+    grant_data = response.json().get("data")
+
+    if not grant_data:
+        return jsonify({"error": "Invalid grant data received"}), 500
+
+    # ✅ Return full grant details instead of just storing metadata
+    return jsonify({
+        "opportunity_id": grant_data["id"],
+        "opportunity_number": grant_data["opportunityNumber"],
+        "title": grant_data["opportunityTitle"],
+        "funding": grant_data.get("estimatedFundingFormatted", "N/A"),
+        "eligibility": grant_data.get("applicantEligibilityDesc", "N/A"),
+        "deadline": grant_data.get("estApplicationResponseDateStr", "N/A"),
+        "agency": grant_data["agencyDetails"]["agencyName"],
+        "description": grant_data.get("forecast", {}).get("forecastDesc", "No description available"),
+        "requirements": grant_data.get("forecast", {}).get("applicantEligibilityDesc", "Not specified"),
+        "objectives": grant_data.get("forecast", {}).get("fundingActivityCategories", "No objectives listed"),
+        "evaluation_criteria": grant_data.get("forecast", {}).get("synopsisModifiedFields", "Not specified"),
+        "past_grants": []  # Placeholder for future past grant references
+    })
+
+
+API_BASE_URL = "http://127.0.0.1:5000"
+
+@app.route("/generate_grant_proposal", methods=["POST"])
+def generate_grant_proposal():
+    """Fetch grant details from API, retrieve relevant context, and generate a grant proposal."""
+    data = request.json
+    opportunity_id = data.get("opportunityId")
+
+    if not opportunity_id:
+        return jsonify({"error": "Opportunity ID is required"}), 400
+
+    # ✅ Fetch grant details from the Grants.gov API
+    grant_response = requests.post(f"{API_BASE_URL}/fetch_and_store_grant", json={"opportunityId": opportunity_id})
+
+    if grant_response.status_code != 200:
+        return jsonify({"error": "Failed to fetch grant details"}), 500
+
+    grant_details = grant_response.json()
+
+    if "error" in grant_details:
+        return jsonify(grant_details), 500
+
+    # ✅ Call the `retrieve_relevant_grants` API
+    retrieval_response = requests.post(f"{API_BASE_URL}/retrieve_relevant_grants", json={"query": grant_details["title"], "top_n": 5})
+
+    if retrieval_response.status_code != 200:
+        return jsonify({"error": "Failed to retrieve relevant grant knowledge"}), 500
+
+    relevant_chunks = retrieval_response.json().get("top_matches", [])
+
+    # ✅ Prepare the structured prompt for GPT-4
+    prompt = f"""
+### **Grant Proposal Generation**
+
+We are applying for the following grant opportunity. Please generate a professional, structured grant proposal based on the details below.
+
+### **Grant Details:**
+- **Title:** {grant_details["title"]}
+- **Funding Amount:** {grant_details["funding"]}
+- **Deadline:** {grant_details["deadline"]}
+- **Eligibility:** {grant_details["eligibility"]}
+- **Agency:** {grant_details["agency"]}
+
+### **Grant Description:**
+{grant_details["description"]}
+
+### **Grant Requirements:**
+{grant_details["requirements"]}
+
+### **Objectives:**
+{grant_details["objectives"]}
+
+### **Evaluation Criteria:**
+{grant_details["evaluation_criteria"]}
+
+### **Relevant Background Information (from RAG pipeline):**
+"""
+    for idx, chunk in enumerate(relevant_chunks, start=1):
+        prompt += f"\n{idx}. **{chunk['title']}** - {chunk['content'][:500]}...\n"
+
+    prompt += """
+---
+### **Instructions:**
+- Ensure the grant proposal follows best practices.
+- The response should be **formal, structured, and professional**.
+- Use the provided details and reference materials as **supporting evidence**.
+- Structure the response into:
+  1. **Introduction**
+  2. **Problem Statement**
+  3. **Proposed Solution**
+  4. **Implementation Plan**
+  5. **Expected Outcomes**
+  6. **Budget Justification**
+  7. **Conclusion**
+"""
+
+    # ✅ Call OpenAI GPT-4 to generate the proposal
+    client = openai.OpenAI(api_key=OPENAI_API_KEY)
+    response = client.chat.completions.create(
+        model="gpt-4",
+        messages=[
+            {"role": "system", "content": "You are a professional grant writer."},
+            {"role": "user", "content": prompt}
+        ]
+    )
+
+    return jsonify({
+        "opportunity_id": opportunity_id,
+        "grant_proposal": response.choices[0].message.content.strip(),
+        "source_chunks": relevant_chunks
+    })
